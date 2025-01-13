@@ -38,6 +38,9 @@ pub use fourbyte::FourByteInspector;
 mod opcount;
 pub use opcount::OpcodeCountInspector;
 
+mod erc_7562_validation;
+pub use erc_7562_validation::Erc7562ValidationTracer;
+
 pub mod types;
 use types::{CallLog, CallTrace, CallTraceStep};
 
