@@ -6,7 +6,7 @@ use std::fmt::Debug;
 
 use alloy_primitives::{
     map::foldhash::{HashMap, HashSet},
-    Address, Bytes, IntoLogData, U256,
+    Address, Bytes, U256,
 };
 use revm::{
     interpreter::{Interpreter, OpCode},
@@ -24,7 +24,7 @@ pub struct Erc7562ValidationTracer {
     reason: String,
     // ignoredOpcodes       map[vm.OpCode]struct{}
     callstack_with_opcodes: Vec<CallFrameWithOpCodes>,
-    // lastOpWithStack      *opcodeWithPartialStack
+    last_opcode_with_stack: Option<OpCodeWithPartialStack>,
     // Keccak               map[string]struct{} `json:"keccak"`
 }
 
@@ -67,7 +67,7 @@ pub struct AccessedSlots {
 
 #[derive(Clone, Debug)]
 pub struct ContractSizeWithOpCode {
-    contract_size: u64,
+    contract_size: usize,
     opcode: OpCode,
 }
 
@@ -77,13 +77,77 @@ pub struct OpCodeWithPartialStack {
     stack_top_items: Vec<U256>,
 }
 
-impl Erc7562ValidationTracer {}
+impl Erc7562ValidationTracer {
+    fn handle_ext_opcodes(
+        &mut self,
+        opcode: OpCode,
+        current_call_frame: &mut CallFrameWithOpCodes,
+    ) {
+        if let Some(last) = self.last_opcode_with_stack.clone() {
+            if is_ext(last.opcode) {
+                let addr = Address::from_slice(&last.stack_top_items[0].as_le_slice());
+
+                if !(last.opcode == OpCode::EXTCODESIZE && opcode == OpCode::ISZERO) {
+                    current_call_frame.ext_code_access_info.push(addr);
+                }
+            }
+        }
+    }
+
+    fn check_revert(&mut self, opcode: OpCode) {
+        if opcode == OpCode::REVERT || opcode == OpCode::RETURN {
+            self.last_opcode_with_stack = None
+        }
+    }
+
+    fn handle_gas_observed(
+        &mut self,
+        opcode: OpCode,
+        current_call_frame: &mut CallFrameWithOpCodes,
+    ) {
+        if let Some(last) = self.last_opcode_with_stack.clone() {
+            let pending_gas_observed = last.opcode == OpCode::GAS && !is_call(opcode);
+            if pending_gas_observed {
+                current_call_frame
+                    .used_opcodes
+                    .entry(OpCode::GAS)
+                    .and_modify(|counter| *counter += 1)
+                    .or_insert(1);
+            }
+        }
+    }
+
+    fn handle_accessed_contract_size<DB: Database>(
+        &mut self,
+        opcode: OpCode,
+        scope: &mut Interpreter,
+        context: &mut EvmContext<DB>,
+        current_call_frame: &mut CallFrameWithOpCodes,
+    ) {
+        if is_ext_or_call(opcode) {
+            let mut n = 0;
+            if !is_ext(opcode) {
+                n = 1
+            }
+
+            let addr = Address::from_slice(scope.stack.peek(n).unwrap().as_le_slice());
+            if !current_call_frame.contract_size.contains_key(&addr) && !is_allowed_precompile(addr)
+            {
+                if let Ok(code) = context.code(addr) {
+                    current_call_frame
+                        .contract_size
+                        .insert(addr, ContractSizeWithOpCode { contract_size: code.len(), opcode });
+                }
+            }
+        }
+    }
+}
 
 impl<DB> Inspector<DB> for Erc7562ValidationTracer
 where
     DB: Database,
 {
-    fn step(&mut self, interp: &mut Interpreter, _context: &mut EvmContext<DB>) {
+    fn step(&mut self, interp: &mut Interpreter, context: &mut EvmContext<DB>) {
         let opcode = OpCode::new(interp.current_opcode()).unwrap();
 
         let mut stack_top_items = vec![];
@@ -95,20 +159,24 @@ where
 
         let opcode_with_stack = OpCodeWithPartialStack { opcode, stack_top_items };
 
-        // t.handleReturnRevert(opcode)
-        // size := len(t.callstackWithOpcodes)
-        // currentCallFrame := &t.callstackWithOpcodes[size-1]
-        // if t.lastOpWithStack != nil {
-        // 	t.handleExtOpcodes(opcode, currentCallFrame)
-        // }
-        // t.handleAccessedContractSize(opcode, scope, currentCallFrame)
-        // if t.lastOpWithStack != nil {
-        // 	t.handleGasObserved(opcode, currentCallFrame)
-        // }
+        let mut current_call_frame = self.callstack_with_opcodes.last().unwrap().clone();
+
+        if self.last_opcode_with_stack.is_some() {
+            self.handle_ext_opcodes(opcode, &mut current_call_frame);
+        }
+
+        self.check_revert(opcode);
+
+        self.handle_accessed_contract_size(opcode, interp, context, &mut current_call_frame);
+
+        if self.last_opcode_with_stack.is_some() {
+            self.handle_gas_observed(opcode, &mut current_call_frame);
+        }
+
         // t.storeUsedOpcode(opcode, currentCallFrame)
         // t.handleStorageAccess(opcode, scope, currentCallFrame)
         // t.storeKeccak(opcode, scope)
-        // t.lastOpWithStack = opcodeWithStack
+        self.last_opcode_with_stack = Some(opcode_with_stack);
     }
 
     fn step_end(&mut self, _interp: &mut Interpreter, _context: &mut EvmContext<DB>) {
@@ -131,13 +199,29 @@ where
             return;
         }
 
-        // fix unwrap here
-        let last = self.callstack_with_opcodes.last_mut().unwrap();
-
-        last.logs.push(CallLog {
-            raw_log: log.data.clone(),
-            decoded: DecodedCallLog { name: None, params: None },
-            position: last.calls.len() as u64,
-        })
+        if let Some(last) = self.callstack_with_opcodes.last_mut() {
+            last.logs.push(CallLog {
+                raw_log: log.data.clone(),
+                decoded: DecodedCallLog { name: None, params: None },
+                position: last.calls.len() as u64,
+            })
+        }
     }
+}
+
+fn is_ext_or_call(opcode: OpCode) -> bool {
+    is_ext(opcode) || is_call(opcode)
+}
+
+fn is_ext(opcode: OpCode) -> bool {
+    matches!(opcode, OpCode::EXTCODEHASH | OpCode::EXTCODESIZE | OpCode::EXTCODECOPY)
+}
+
+fn is_call(opcode: OpCode) -> bool {
+    matches!(opcode, OpCode::CALL | OpCode::CALLCODE | OpCode::DELEGATECALL | OpCode::STATICCALL)
+}
+
+fn is_allowed_precompile(address: Address) -> bool {
+    let address_int = U256::from_le_slice(address.as_slice());
+    return address_int > U256::ZERO && address_int < U256::from(10u32);
 }
