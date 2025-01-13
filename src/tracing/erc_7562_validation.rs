@@ -5,7 +5,7 @@
 use std::fmt::Debug;
 
 use alloy_primitives::{
-    map::foldhash::{HashMap, HashSet},
+    map::foldhash::{HashMap, HashSet, HashSetExt},
     Address, Bytes, U256,
 };
 use revm::{
@@ -14,6 +14,12 @@ use revm::{
 };
 
 use super::types::{CallLog, DecodedCallLog};
+
+macro_rules! increment_count {
+    ($map:expr, $k:expr) => {{
+        $map.entry($k).and_modify(|v| *v += 1).or_insert(1);
+    }};
+}
 
 #[derive(Clone, Debug)]
 pub struct Erc7562ValidationTracer {
@@ -29,14 +35,31 @@ pub struct Erc7562ValidationTracer {
 }
 
 #[derive(Clone, Debug)]
-pub struct Erc7562ValidationTracerConfig {
+struct Erc7562ValidationTracerConfig {
     stack_top_items_size: usize,
     ignored_opcodes: HashSet<OpCode>,
     with_log: bool,
 }
 
+impl Erc7562ValidationTracerConfig {
+    fn get_full_configuration(
+        partial: Erc7562ValidationTracerConfig,
+    ) -> Erc7562ValidationTracerConfig {
+        let mut config = partial;
+
+        if config.ignored_opcodes.is_empty() {
+            config.ignored_opcodes = default_ignored_opcodes();
+        }
+        if config.stack_top_items_size == 0 {
+            config.stack_top_items_size = 3;
+        }
+
+        config
+    }
+}
+
 #[derive(Clone, Debug)]
-pub struct CallFrameWithOpCodes {
+struct CallFrameWithOpCodes {
     ty: OpCode,
     from: Address,
     gas: u64,
@@ -58,7 +81,7 @@ pub struct CallFrameWithOpCodes {
 }
 
 #[derive(Clone, Debug)]
-pub struct AccessedSlots {
+struct AccessedSlots {
     reads: HashMap<String, Vec<String>>,
     writes: HashMap<String, u64>,
     transient_reads: HashMap<String, u64>,
@@ -66,13 +89,13 @@ pub struct AccessedSlots {
 }
 
 #[derive(Clone, Debug)]
-pub struct ContractSizeWithOpCode {
+struct ContractSizeWithOpCode {
     contract_size: usize,
     opcode: OpCode,
 }
 
 #[derive(Clone, Debug)]
-pub struct OpCodeWithPartialStack {
+struct OpCodeWithPartialStack {
     opcode: OpCode,
     stack_top_items: Vec<U256>,
 }
@@ -108,12 +131,25 @@ impl Erc7562ValidationTracer {
         if let Some(last) = self.last_opcode_with_stack.clone() {
             let pending_gas_observed = last.opcode == OpCode::GAS && !is_call(opcode);
             if pending_gas_observed {
-                current_call_frame
-                    .used_opcodes
-                    .entry(OpCode::GAS)
-                    .and_modify(|counter| *counter += 1)
-                    .or_insert(1);
+                increment_count!(current_call_frame.used_opcodes, OpCode::GAS);
             }
+        }
+    }
+
+    // fn store_kekkak(&mut self, opcode: OpCode, scope: &mut Interpreter) {
+    //     if opcode == OpCode::KECCAK256 {
+    //         let data_offset = scope.stack.peek(0).unwrap();
+    //         let data_length = scope.stack.peek(1).unwrap();
+    //         // memory := scope.MemoryData()
+    //         let keccak = Vec::with_capacity(data_length);
+    //         // copy(keccak, memory[dataOffset:dataOffset+dataLength])
+    //         // t.Keccak[string(keccak)] = struct{}{}
+    //     }
+    // }
+
+    fn store_used_opcode(&mut self, opcode: OpCode, current_call_frame: &mut CallFrameWithOpCodes) {
+        if opcode != OpCode::GAS && !self.config.ignored_opcodes.contains(&opcode) {
+            increment_count!(current_call_frame.used_opcodes, opcode);
         }
     }
 
@@ -137,6 +173,45 @@ impl Erc7562ValidationTracer {
                     current_call_frame
                         .contract_size
                         .insert(addr, ContractSizeWithOpCode { contract_size: code.len(), opcode });
+                }
+            }
+        }
+    }
+
+    fn handle_storage_access<DB: Database>(
+        &mut self,
+        opcode: OpCode,
+        scope: &mut Interpreter,
+        context: &mut EvmContext<DB>,
+        current_call_frame: &mut CallFrameWithOpCodes,
+    ) {
+        if matches!(opcode, OpCode::SLOAD | OpCode::SSTORE | OpCode::TLOAD | OpCode::TSTORE) {
+            let slot = scope.stack.peek(0).unwrap();
+            let address = Address::from_slice(slot.as_le_slice());
+            let slot_hex = format!("{:#x}", slot);
+
+            match opcode {
+                OpCode::SLOAD => {
+                    let reads = current_call_frame.accessed_slots.reads.get(&slot_hex);
+                    let writes = current_call_frame.accessed_slots.reads.get(&slot_hex);
+
+                    if reads.is_none() && writes.is_none() {
+                        if let Ok(state) = context.db.storage(address, slot) {
+                            current_call_frame
+                                .accessed_slots
+                                .reads
+                                .insert(slot_hex, vec![format!("{:#x}", state)]);
+                        }
+                    }
+                }
+                OpCode::SSTORE => {
+                    increment_count!(current_call_frame.accessed_slots.writes, slot_hex);
+                }
+                OpCode::TLOAD => {
+                    increment_count!(current_call_frame.accessed_slots.transient_reads, slot_hex);
+                }
+                _ => {
+                    increment_count!(current_call_frame.accessed_slots.transient_writes, slot_hex);
                 }
             }
         }
@@ -173,9 +248,10 @@ where
             self.handle_gas_observed(opcode, &mut current_call_frame);
         }
 
-        // t.storeUsedOpcode(opcode, currentCallFrame)
-        // t.handleStorageAccess(opcode, scope, currentCallFrame)
-        // t.storeKeccak(opcode, scope)
+        self.store_used_opcode(opcode, &mut current_call_frame);
+        self.handle_storage_access(opcode, interp, context, &mut current_call_frame);
+        // self.store_keccak(opcode, interp);
+
         self.last_opcode_with_stack = Some(opcode_with_stack);
     }
 
@@ -224,4 +300,39 @@ fn is_call(opcode: OpCode) -> bool {
 fn is_allowed_precompile(address: Address) -> bool {
     let address_int = U256::from_le_slice(address.as_slice());
     return address_int > U256::ZERO && address_int < U256::from(10u32);
+}
+
+fn default_ignored_opcodes() -> HashSet<OpCode> {
+    let mut ignored = HashSet::new();
+
+    // Allow all PUSHx, DUPx, and SWAPx opcodes
+    for op in OpCode::PUSH0.get()..=OpCode::SWAP16.get() {
+        let op = unsafe { std::mem::transmute(op) };
+        ignored.insert(op);
+    }
+
+    let additional_ops = [
+        OpCode::POP,
+        OpCode::ADD,
+        OpCode::SUB,
+        OpCode::MUL,
+        OpCode::DIV,
+        OpCode::EQ,
+        OpCode::LT,
+        OpCode::GT,
+        OpCode::SLT,
+        OpCode::SGT,
+        OpCode::SHL,
+        OpCode::SHR,
+        OpCode::AND,
+        OpCode::OR,
+        OpCode::NOT,
+        OpCode::ISZERO,
+    ];
+
+    for op in additional_ops {
+        ignored.insert(op);
+    }
+
+    ignored
 }
