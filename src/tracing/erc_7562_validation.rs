@@ -5,8 +5,9 @@
 use std::fmt::Debug;
 
 use alloy_primitives::{
+    bytes::Bytes,
     map::foldhash::{HashMap, HashSet, HashSetExt},
-    Address, Bytes, U256,
+    Address, U256,
 };
 use revm::{
     interpreter::{Interpreter, OpCode},
@@ -21,7 +22,7 @@ macro_rules! increment_count {
     }};
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Erc7562ValidationTracer {
     config: Erc7562ValidationTracerConfig,
     gas_limit: u64,
@@ -31,30 +32,19 @@ pub struct Erc7562ValidationTracer {
     // ignoredOpcodes       map[vm.OpCode]struct{}
     callstack_with_opcodes: Vec<CallFrameWithOpCodes>,
     last_opcode_with_stack: Option<OpCodeWithPartialStack>,
-    // Keccak               map[string]struct{} `json:"keccak"`
+    keccak: HashSet<Bytes>,
 }
 
-#[derive(Clone, Debug)]
-struct Erc7562ValidationTracerConfig {
+#[derive(Clone, Debug, Default)]
+pub struct Erc7562ValidationTracerConfig {
     stack_top_items_size: usize,
     ignored_opcodes: HashSet<OpCode>,
     with_log: bool,
 }
 
 impl Erc7562ValidationTracerConfig {
-    fn get_full_configuration(
-        partial: Erc7562ValidationTracerConfig,
-    ) -> Erc7562ValidationTracerConfig {
-        let mut config = partial;
-
-        if config.ignored_opcodes.is_empty() {
-            config.ignored_opcodes = default_ignored_opcodes();
-        }
-        if config.stack_top_items_size == 0 {
-            config.stack_top_items_size = 3;
-        }
-
-        config
+    pub fn new() -> Self {
+        Self { stack_top_items_size: 3, with_log: true, ignored_opcodes: default_ignored_opcodes() }
     }
 }
 
@@ -101,6 +91,10 @@ struct OpCodeWithPartialStack {
 }
 
 impl Erc7562ValidationTracer {
+    pub fn new() -> Self {
+        Self { config: Erc7562ValidationTracerConfig::new(), ..Default::default() }
+    }
+
     fn handle_ext_opcodes(
         &mut self,
         opcode: OpCode,
@@ -136,16 +130,16 @@ impl Erc7562ValidationTracer {
         }
     }
 
-    // fn store_kekkak(&mut self, opcode: OpCode, scope: &mut Interpreter) {
-    //     if opcode == OpCode::KECCAK256 {
-    //         let data_offset = scope.stack.peek(0).unwrap();
-    //         let data_length = scope.stack.peek(1).unwrap();
-    //         // memory := scope.MemoryData()
-    //         let keccak = Vec::with_capacity(data_length);
-    //         // copy(keccak, memory[dataOffset:dataOffset+dataLength])
-    //         // t.Keccak[string(keccak)] = struct{}{}
-    //     }
-    // }
+    fn store_keccak(&mut self, opcode: OpCode, scope: &mut Interpreter) {
+        if opcode == OpCode::KECCAK256 {
+            let data_offset: u64 = scope.stack.peek(0).unwrap().to();
+            let data_length: u64 = scope.stack.peek(1).unwrap().to();
+            let memory = &scope.shared_memory;
+            let data = memory.slice(data_offset as usize, data_length as usize).to_vec();
+            let keccak_bytes = Bytes::from(data);
+            self.keccak.insert(keccak_bytes);
+        }
+    }
 
     fn store_used_opcode(&mut self, opcode: OpCode, current_call_frame: &mut CallFrameWithOpCodes) {
         if opcode != OpCode::GAS && !self.config.ignored_opcodes.contains(&opcode) {
@@ -250,8 +244,7 @@ where
 
         self.store_used_opcode(opcode, &mut current_call_frame);
         self.handle_storage_access(opcode, interp, context, &mut current_call_frame);
-        // self.store_keccak(opcode, interp);
-
+        self.store_keccak(opcode, interp);
         self.last_opcode_with_stack = Some(opcode_with_stack);
     }
 
