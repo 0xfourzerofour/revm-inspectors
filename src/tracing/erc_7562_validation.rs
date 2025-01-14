@@ -6,15 +6,17 @@ use std::fmt::Debug;
 
 use alloy_primitives::{
     bytes::Bytes,
-    map::foldhash::{HashMap, HashSet, HashSetExt},
+    map::foldhash::{HashSet, HashSetExt},
     Address, U256,
+};
+use alloy_rpc_types_trace::geth::{
+    erc_7562::{CallFrameWithOpCodes, ContractSizeWithOpCode, Erc7562ValidationTracerConfig},
+    CallLogFrame,
 };
 use revm::{
     interpreter::{Interpreter, OpCode},
     Database, EvmContext, Inspector,
 };
-
-use super::types::{CallLog, DecodedCallLog};
 
 macro_rules! increment_count {
     ($map:expr, $k:expr) => {{
@@ -23,65 +25,15 @@ macro_rules! increment_count {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct Erc7562ValidationTracer {
+struct Erc7562ValidationTracer {
     config: Erc7562ValidationTracerConfig,
     gas_limit: u64,
     depth: usize,
     interrupt: bool,
     reason: String,
-    // ignoredOpcodes       map[vm.OpCode]struct{}
     callstack_with_opcodes: Vec<CallFrameWithOpCodes>,
     last_opcode_with_stack: Option<OpCodeWithPartialStack>,
     keccak: HashSet<Bytes>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct Erc7562ValidationTracerConfig {
-    stack_top_items_size: usize,
-    ignored_opcodes: HashSet<OpCode>,
-    with_log: bool,
-}
-
-impl Erc7562ValidationTracerConfig {
-    pub fn new() -> Self {
-        Self { stack_top_items_size: 3, with_log: true, ignored_opcodes: default_ignored_opcodes() }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct CallFrameWithOpCodes {
-    ty: OpCode,
-    from: Address,
-    gas: u64,
-    gas_used: u64,
-    to: Address,
-    input: Bytes,
-    output: Bytes,
-    error: String,
-    revert_reason: String,
-    logs: Vec<CallLog>,
-    value: U256,
-    reverted_snapshot: bool,
-    accessed_slots: AccessedSlots,
-    ext_code_access_info: Vec<Address>,
-    used_opcodes: HashMap<OpCode, u64>,
-    contract_size: HashMap<Address, ContractSizeWithOpCode>,
-    out_of_gas: bool,
-    calls: Vec<CallFrameWithOpCodes>,
-}
-
-#[derive(Clone, Debug)]
-struct AccessedSlots {
-    reads: HashMap<String, Vec<String>>,
-    writes: HashMap<String, u64>,
-    transient_reads: HashMap<String, u64>,
-    transient_writes: HashMap<String, u64>,
-}
-
-#[derive(Clone, Debug)]
-struct ContractSizeWithOpCode {
-    contract_size: usize,
-    opcode: OpCode,
 }
 
 #[derive(Clone, Debug)]
@@ -125,7 +77,7 @@ impl Erc7562ValidationTracer {
         if let Some(last) = self.last_opcode_with_stack.clone() {
             let pending_gas_observed = last.opcode == OpCode::GAS && !is_call(opcode);
             if pending_gas_observed {
-                increment_count!(current_call_frame.used_opcodes, OpCode::GAS);
+                increment_count!(current_call_frame.used_opcodes, OpCode::GAS.get());
             }
         }
     }
@@ -142,8 +94,8 @@ impl Erc7562ValidationTracer {
     }
 
     fn store_used_opcode(&mut self, opcode: OpCode, current_call_frame: &mut CallFrameWithOpCodes) {
-        if opcode != OpCode::GAS && !self.config.ignored_opcodes.contains(&opcode) {
-            increment_count!(current_call_frame.used_opcodes, opcode);
+        if opcode != OpCode::GAS && !self.config.ignored_opcodes.contains(&opcode.get()) {
+            increment_count!(current_call_frame.used_opcodes, opcode.get());
         }
     }
 
@@ -164,9 +116,10 @@ impl Erc7562ValidationTracer {
             if !current_call_frame.contract_size.contains_key(&addr) && !is_allowed_precompile(addr)
             {
                 if let Ok(code) = context.code(addr) {
-                    current_call_frame
-                        .contract_size
-                        .insert(addr, ContractSizeWithOpCode { contract_size: code.len(), opcode });
+                    current_call_frame.contract_size.insert(
+                        addr,
+                        ContractSizeWithOpCode { contract_size: code.len(), opcode: opcode.get() },
+                    );
                 }
             }
         }
@@ -269,10 +222,10 @@ where
         }
 
         if let Some(last) = self.callstack_with_opcodes.last_mut() {
-            last.logs.push(CallLog {
-                raw_log: log.data.clone(),
-                decoded: DecodedCallLog { name: None, params: None },
-                position: last.calls.len() as u64,
+            last.logs.push(CallLogFrame {
+                data: Some(log.data.data.clone()),
+                position: Some(last.calls.len() as u64),
+                ..Default::default()
             })
         }
     }

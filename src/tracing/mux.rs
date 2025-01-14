@@ -2,6 +2,7 @@ use crate::tracing::{FourByteInspector, TracingInspector, TracingInspectorConfig
 use alloy_primitives::{map::HashMap, Address, Log, U256};
 use alloy_rpc_types_eth::TransactionInfo;
 use alloy_rpc_types_trace::geth::{
+    erc_7562::Erc7562ValidationTracerConfig,
     mux::{MuxConfig, MuxFrame},
     CallConfig, FlatCallConfig, FourByteFrame, GethDebugBuiltInTracerType, NoopFrame,
     PreStateConfig,
@@ -31,6 +32,7 @@ pub struct MuxInspector {
 enum TraceConfig {
     Call(CallConfig),
     PreState(PreStateConfig),
+    Erc7562(Erc7562ValidationTracerConfig),
     FlatCall(FlatCallConfig),
     Noop,
 }
@@ -50,6 +52,13 @@ impl MuxInspector {
                         return Err(Error::UnexpectedConfig(tracer_type));
                     }
                     four_byte = Some(FourByteInspector::default());
+                }
+                GethDebugBuiltInTracerType::Erc7562Tracer => {
+                    let tracer_config = tracer_config
+                        .ok_or(Error::MissingConfig(tracer_type))?
+                        .into_erc_7562_tracer_config()?;
+
+                    configs.push((tracer_type, TraceConfig::Erc7562(tracer_config)));
                 }
                 GethDebugBuiltInTracerType::CallTracer => {
                     let call_config = tracer_config
@@ -115,6 +124,9 @@ impl MuxInspector {
                     } else {
                         continue;
                     }
+                }
+                TraceConfig::Erc7562(_erc_7562_config) => {
+                    continue;
                 }
                 TraceConfig::PreState(prestate_config) => {
                     if let Some(inspector) = &self.tracing {

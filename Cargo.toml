@@ -28,6 +28,9 @@ rust.rust_2018_idioms = "deny"
 rustdoc.all = "warn"
 clippy.lint_groups_priority = "allow"
 
+[patch.crates-io]
+alloy-rpc-types-trace = { path = "../alloy-fork/crates/rpc-types-trace", default-features = false }
+
 [dependencies]
 # eth
 alloy-rpc-types-eth = "0.9"
