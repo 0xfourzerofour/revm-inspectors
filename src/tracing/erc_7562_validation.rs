@@ -25,7 +25,7 @@ macro_rules! increment_count {
 }
 
 #[derive(Clone, Debug, Default)]
-struct Erc7562ValidationTracer {
+pub struct Erc7562ValidationTracer {
     config: Erc7562ValidationTracerConfig,
     gas_limit: u64,
     depth: usize,
@@ -281,4 +281,16 @@ fn default_ignored_opcodes() -> HashSet<OpCode> {
     }
 
     ignored
+}
+
+impl From<&Erc7562ValidationTracer> for CallFrameWithOpCodes {
+    fn from(value: &Erc7562ValidationTracer) -> Self {
+        value.callstack_with_opcodes[0].clone()
+    }
+}
+
+impl From<Erc7562ValidationTracer> for CallFrameWithOpCodes {
+    fn from(value: Erc7562ValidationTracer) -> Self {
+        value.callstack_with_opcodes[0].clone()
+    }
 }
