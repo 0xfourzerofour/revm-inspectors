@@ -1,6 +1,9 @@
 use alloy_primitives::{map::HashSet, U256};
 use alloy_rpc_types_trace::{
-    geth::{CallConfig, FlatCallConfig, GethDefaultTracingOptions, PreStateConfig},
+    geth::{
+        erc_7562::Erc7562ValidationTracerConfig, CallConfig, FlatCallConfig,
+        GethDefaultTracingOptions, PreStateConfig,
+    },
     parity::TraceType,
 };
 use revm::interpreter::OpCode;
@@ -185,6 +188,13 @@ impl TracingInspectorConfig {
         Self::none()
             // call tracer is similar parity tracer with optional support for logs
             .set_record_logs(config.with_log.unwrap_or_default())
+    }
+
+    #[inline]
+    pub fn from_erc_7562_tracer_config(config: &Erc7562ValidationTracerConfig) -> Self {
+        Self::none()
+            // call tracer is similar parity tracer with optional support for logs
+            .set_record_logs(config.with_log)
     }
 
     /// Returns a config for geth's
