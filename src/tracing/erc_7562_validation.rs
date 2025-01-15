@@ -24,7 +24,7 @@ macro_rules! increment_count {
 #[derive(Clone, Debug, Default)]
 pub struct Erc7562ValidationTracer {
     config: Erc7562ValidationTracerConfig,
-    gas_limit: u64,
+    gas_limit: U256,
     depth: usize,
     interrupt: bool,
     callstack_with_opcodes: Vec<CallFrameWithOpCodes>,
@@ -176,15 +176,12 @@ impl Erc7562ValidationTracer {
                     }
                 }
                 OpCode::SSTORE => {
-                    println!("HERE SSTORE");
                     increment_count!(current_call_frame.accessed_slots.writes, slot_hex);
                 }
                 OpCode::TLOAD => {
-                    println!("HERE TLOAD");
                     increment_count!(current_call_frame.accessed_slots.transient_reads, slot_hex);
                 }
                 _ => {
-                    println!("HERE OTHER");
                     increment_count!(current_call_frame.accessed_slots.transient_writes, slot_hex);
                 }
             }
@@ -201,20 +198,20 @@ where
         context: &mut EvmContext<DB>,
         inputs: &mut revm::interpreter::CallInputs,
     ) -> Option<revm::interpreter::CallOutcome> {
-        self.gas_limit = inputs.gas_limit;
+        self.gas_limit = U256::from(inputs.gas_limit);
         self.depth = context.journaled_state.depth;
 
         let mut call = CallFrameWithOpCodes {
-            ty: get_opcode_from_call_scheme(inputs.scheme),
+            typ: get_opcode_from_call_scheme(inputs.scheme),
             from: inputs.caller,
-            to: inputs.target_address,
+            to: Some(inputs.target_address),
             input: inputs.input.clone(),
-            value: inputs.value.get(),
+            value: Some(inputs.value.get()),
             ..Default::default()
         };
 
         if context.journaled_state.depth == 0 {
-            call.gas = inputs.gas_limit;
+            call.gas = U256::from(inputs.gas_limit);
         }
 
         self.callstack_with_opcodes.push(call);
@@ -253,36 +250,6 @@ where
         self.last_opcode_with_stack = Some(opcode_with_stack);
     }
 
-    /*
-
-    func (t *erc7562Tracer) OnExit(depth int, output []byte, gasUsed uint64, err error, reverted bool) {
-        defer catchPanic()
-        if depth == 0 {
-            t.captureEnd(output, gasUsed, err, reverted)
-            return
-        }
-
-        t.depth = depth - 1
-
-        size := len(t.callstackWithOpcodes)
-        if size <= 1 {
-            return
-        }
-        // Pop call.
-        call := t.callstackWithOpcodes[size-1]
-        t.callstackWithOpcodes = t.callstackWithOpcodes[:size-1]
-        size -= 1
-
-        if errors.Is(err, vm.ErrCodeStoreOutOfGas) || errors.Is(err, vm.ErrOutOfGas) {
-            call.OutOfGas = true
-        }
-        call.GasUsed = gasUsed
-        call.processOutput(output, err, reverted)
-        // Nest call into parent.
-        t.callstackWithOpcodes[size-1].Calls = append(t.callstackWithOpcodes[size-1].Calls, call)
-    }
-    */
-
     fn call_end(
         &mut self,
         _context: &mut EvmContext<DB>,
@@ -307,7 +274,7 @@ where
             call.out_of_gas = true;
         }
 
-        call.gas_used = outcome.gas().spent();
+        call.gas_used = U256::from(outcome.gas().spent());
         let new_call = process_output(call.clone(), outcome.clone());
 
         self.callstack_with_opcodes.last_mut().unwrap().calls.push(new_call);
@@ -403,7 +370,7 @@ impl From<Erc7562ValidationTracer> for CallFrameWithOpCodes {
     }
 }
 
-fn get_opcode_from_call_scheme(call_scheme: CallScheme) -> u8 {
+fn get_opcode_from_call_scheme(call_scheme: CallScheme) -> String {
     let opcode = match call_scheme {
         CallScheme::Call => OpCode::CALL,
         CallScheme::CallCode => OpCode::CALLCODE,
@@ -414,10 +381,10 @@ fn get_opcode_from_call_scheme(call_scheme: CallScheme) -> u8 {
         CallScheme::ExtCall => OpCode::EXTCALL,
     };
 
-    opcode.get()
+    opcode.to_string()
 }
 
-pub fn process_output(frame: CallFrameWithOpCodes, output: CallOutcome) -> CallFrameWithOpCodes {
+fn process_output(frame: CallFrameWithOpCodes, output: CallOutcome) -> CallFrameWithOpCodes {
     let mut new_frame = frame.clone();
 
     if output.result.is_ok() {
@@ -426,7 +393,7 @@ pub fn process_output(frame: CallFrameWithOpCodes, output: CallOutcome) -> CallF
     }
 
     if output.result.is_error() {
-        new_frame.error = format!("{:?}", output.result.result);
+        new_frame.error = Some(format!("{:?}", output.result.result));
 
         if output.result.output.is_empty() {
             return new_frame;
@@ -435,7 +402,7 @@ pub fn process_output(frame: CallFrameWithOpCodes, output: CallOutcome) -> CallF
 
     if output.result.is_revert() && output.result.output.len() >= 4 {
         if let Some(reason) = RevertReason::decode(&output.result.output) {
-            new_frame.revert_reason = reason.to_string();
+            new_frame.revert_reason = Some(reason.to_string());
         }
     }
 
