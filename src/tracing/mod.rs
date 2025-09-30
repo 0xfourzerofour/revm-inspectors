@@ -46,6 +46,9 @@ pub use opcount::OpcodeCountInspector;
 pub mod types;
 use types::{CallLog, CallTrace, CallTraceStep};
 
+mod erc_7562;
+pub use erc_7562::Ecr7562Inspector;
+
 mod utils;
 
 #[cfg(feature = "std")]
